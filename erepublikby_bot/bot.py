@@ -23,11 +23,11 @@ HELLO_TEXT = """\
 /rw - Пакзвае, калі будзе наступнае пераможнае паўстанне.\
 """
 RW_TEXT = """\
-Наступнае пераможнае паўстаньне можна падтрымаць у {region} (Беларусь) \
+Наступнае пераможнае паўстаньне можна падтрымаць у *{region}* (Беларусь) \
 {time} (±3 хвіліны). Для гэтага вам трэба знаходзіцца ў пазначаным \
 рэгіёне і націснуць кнопку падтрымкі на галоўнай старонцы гульні.
 
-http://prntscr.com/bsot4o\
+[_](http://prntscr.com/bsot4o)\
 """
 RETRIES = 5
 
@@ -261,7 +261,7 @@ class Bot:
         if day is None:
             raise Exception('Not today and not tommorow. %s' % last_battle)
         next_battle_time_str = next_battle_at_belarus.strftime('%H:%M')
-        time = '{} пасьля {}'.format(day, next_battle_time_str)
+        time = '*{}* пасьля *{}*'.format(day, next_battle_time_str)
 
         await self.post(
             'sendMessage', chat_id=chat_id,
