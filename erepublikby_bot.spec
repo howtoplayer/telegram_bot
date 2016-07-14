@@ -3,7 +3,7 @@
 block_cipher = None
 
 
-a = Analysis(['main.py'],
+a = Analysis(['erepublikby_bot/__main__.py'],
              pathex=['/home/gomzik/prg/py/erepublik_bot'],
              binaries=None,
              datas=None,
@@ -21,7 +21,7 @@ exe = EXE(pyz,
           a.binaries,
           a.zipfiles,
           a.datas,
-          name='main',
+          name='erepublikby_bot',
           debug=False,
           strip=False,
           upx=True,

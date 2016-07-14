@@ -6,7 +6,7 @@ import datetime
 import aiohttp
 import pytz
 
-from parsers.erepublik_deutchland import get_last_battle
+from erepublikby_bot.parsers.erepublik_deutchland import get_last_battle
 
 
 MINSK_ZONE = pytz.timezone('Europe/Minsk')

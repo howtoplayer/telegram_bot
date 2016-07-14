@@ -2,7 +2,7 @@ from argparse import ArgumentParser
 import logging
 import asyncio
 
-from bot import Bot
+from erepublikby_bot.bot import Bot
 
 
 LOGGING_LEVELS = (
