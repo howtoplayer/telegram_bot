@@ -12,6 +12,7 @@ LOGGING_LEVELS = (
 
 parser = ArgumentParser()
 parser.add_argument('--log-level', choices=LOGGING_LEVELS, default='INFO')
+parser.add_argument('--admin', action='append', dest='admins')
 parser.add_argument('token')
 
 
@@ -27,7 +28,8 @@ def main():
     logger = logging.getLogger(__name__)
     logger.info('Starting bot...')
     loop = asyncio.get_event_loop()
-    bot = Bot(loop=loop, token=opts.token, logger=logger)
+    bot = Bot(loop=loop, token=opts.token, logger=logger,
+              admins=tuple(opts.admins))
     try:
         loop.run_until_complete(bot.run())
     except KeyboardInterrupt:

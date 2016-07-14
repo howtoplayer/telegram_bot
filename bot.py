@@ -1,21 +1,36 @@
 import asyncio
+import traceback
+from functools import partial
+
 import aiohttp
 
 
 API_BASE_URL = 'https://api.telegram.org/bot{token}/{method}'
 MAXIMUM_CONCURENT_REQUESTS = 50
 REQUESTS_TIMEOUT = 10
-LONG_POLLING_TIME = 60
-HELLO_TEXT = """
-Вас вітае бот [ERepublikByBot](https://telegram.me/erepublikby_bot)!
+LONG_POLLING_TIME = 300
+HELLO_TEXT = """\
+Вас вітае бот [{first_name}](https://telegram.me/{username})!
+
+Даступныя каманды:
+/rw - Пакзвае, калі будзе наступнае пераможнае паўстанне.\
 """
+RW_TEXT = """\
+Наступнае пераможнае паўстаньне адбудзецца ў {region} а {time}\
+"""
+RETRIES = 5
+
+
+class BadResponseError(Exception):
+    pass
 
 
 class Bot:
-    def __init__(self, loop, logger, token):
+    def __init__(self, loop, logger, token, admins=tuple()):
         self.logger = logger
         self.loop = loop
         self.token = token
+        self.admins = admins
 
         self.running = False
         self.session = aiohttp.ClientSession(loop=self.loop)
@@ -32,20 +47,59 @@ class Bot:
         self.running = True
 
         try:
-            await self.get_bot_info()
+            bot_info = await self.get_bot_info()
         except Exception:
             self.logger.critical('Cant connect to telegram', exc_info=True)
             return
 
-        self.pull_task = self.loop.create_task(self.pull_events())
+        self.bot_info = bot_info
+
+        retry = 0
 
         while self.running:
-            if self.pending_tasks:
-                done, pending = await asyncio.wait(
-                    self.pending_tasks, return_when=asyncio.FIRST_COMPLETED)
-                self.pending_tasks = pending
-            else:
-                await asyncio.sleep(0)
+            self.pull_task = self.loop.create_task(self.pull_events())
+            try:
+                await self.pull_task
+            except asyncio.TimeoutError:  # Try again if timeout error received
+                pass
+            except Exception:  # Shutdown otherwise
+                self.on_task_done(self.pull_task)
+                retry += 1
+                if retry == RETRIES:
+                    raise
+                await asyncio.sleep(2 ** retry)
+
+    def on_task_done(self, task, payload=None):
+        try:
+            task.result()
+        except asyncio.CancelledError:
+            pass
+        except Exception:
+            self.logger.error(
+                'An error occured %s', str(payload), exc_info=True)
+            self.spawn_task(
+                self.send_to_admins, traceback.format_exc(), payload)
+
+        try:
+            self.pending_tasks.remove(task)
+        except KeyError:
+            pass
+
+    def spawn_task(self, coro, *args, **kwargs):
+        task = self.loop.create_task(coro(*args, **kwargs))
+        self.pending_tasks.add(task)
+        task.add_done_callback(partial(
+            self.on_task_done, payload=(coro.__name__, args, kwargs)))
+
+    async def send_to_admins(self, tb, additional):
+        async def send_exception():
+            await self.post('sendMessage', chat_id=admin, text=tb)
+            await self.post('sendMessage', chat_id=admin, text=str(additional))
+
+        tasks = set()
+        for admin in self.admins:
+            tasks.add(send_exception())
+        await asyncio.wait(tasks, loop=self.loop)
 
     async def pull_events(self):
         while self.running:
@@ -56,30 +110,49 @@ class Bot:
 
             self.logger.debug('Events getted %s', events)
 
-            if events['ok'] and events['result']:
-                for event in events['result']:
-                    self.logger.debug('Process event %s', event)
-                    task = None
-                    if 'message' in event:
-                        task = self.loop.create_task(
-                            self.handle_message(event))
-                    else:
-                        self.logger.warning('Got unexpected event %s', event)
+            for event in events:
+                self.logger.debug('Process event %s', event)
+                if 'message' in event:
+                    self.spawn_task(self.handle_message, event)
+                else:
+                    self.logger.warning('Got unexpected event %s', event)
 
-                    if task is not None:
-                        self.pending_tasks.add(task)
+                self.last_seen_update_id = max(
+                    self.last_seen_update_id, event['update_id'] + 1)
 
-                    self.last_seen_update_id = max(
-                        self.last_seen_update_id, event['update_id'] + 1)
+    def clean_command(self, text):
+        cmd, *args = text.split()
+        if '@' in cmd:
+            cmd, name, *garbage = cmd.split('@')
+            if garbage:
+                return None
+
+            if name != self.bot_info['username']:
+                return None
+
+        return cmd, args
 
     async def handle_message(self, event):
         self.logger.debug('Got message %s', event)
         message = event['message']
         chat_id = message['chat']['id']
+        message_id = message['message_id']
         text = message['text']
 
-        if text == '/start':
+        if text[0] != '/':
+            return await self.handle_regular_message(event)
+
+        cmd, args = self.clean_command(text)
+
+        if cmd == '/start' or cmd == '/help':
             return await self.send_hello_text(chat_id)
+        elif cmd == '/rw':
+            return await self.send_rw_data(chat_id, message_id)
+        else:
+            self.logger.warning('Unsupported command %s (%s)', cmd, event)
+
+    async def handle_regular_message(self, event):
+        self.logger.debug('Regular message %s', event['message']['text'])
 
     async def kill(self):
         self.logger.info('Atempt to graceful shutdown...')
@@ -107,6 +180,7 @@ class Bot:
         self.logger.info('Testing token...')
         bot_info = await self.get('getMe')
         self.logger.info(bot_info)
+        return bot_info
 
     async def get(self, method, *, _short=True, **kwargs):
         url = API_BASE_URL.format(token=self.token, method=method)
@@ -119,7 +193,11 @@ class Bot:
         async with self.semaphore:
             with aiohttp.Timeout(timeout, loop=self.loop):
                 async with self.session.get(url, params=kwargs) as resp:
-                    return (await resp.json())
+                    json = await resp.json()
+                    if not json or not json.get('ok', False):
+                        raise BadResponseError(
+                            'Telegram server returns bad response %s' % json)
+                    return json['result']
 
     async def post(self, method, *, _short=True, **kwargs):
         url = API_BASE_URL.format(token=self.token, method=method)
@@ -132,9 +210,20 @@ class Bot:
         async with self.semaphore:
             with aiohttp.Timeout(timeout, loop=self.loop):
                 async with self.session.post(url, data=kwargs) as resp:
-                    return (await resp.json())
+                    json = await resp.json()
+                    if not json or not json.get('ok', False):
+                        raise BadResponseError(
+                            'Telegram server returns bad response %s' % json)
+                    return json['result']
 
     async def send_hello_text(self, chat_id):
         await self.post(
-            'sendMessage', chat_id=chat_id, text=HELLO_TEXT,
+            'sendMessage', chat_id=chat_id,
+            text=HELLO_TEXT.format(**self.bot_info),
+            parse_mode='Markdown', disable_web_page_preview=True)
+
+    async def send_rw_data(self, chat_id, msg_id):
+        await self.post(
+            'sendMessage', chat_id=chat_id,
+            text=RW_TEXT, reply_to_message_id=msg_id,
             parse_mode='Markdown', disable_web_page_preview=True)
