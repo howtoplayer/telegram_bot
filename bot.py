@@ -1,8 +1,15 @@
 import asyncio
 import traceback
 from functools import partial
+import datetime
 
 import aiohttp
+import pytz
+
+from parsers.erepublik_deutchland import get_last_battle
+
+
+MINSK_ZONE = pytz.timezone('Europe/Minsk')
 
 
 API_BASE_URL = 'https://api.telegram.org/bot{token}/{method}'
@@ -16,9 +23,17 @@ HELLO_TEXT = """\
 /rw - Пакзвае, калі будзе наступнае пераможнае паўстанне.\
 """
 RW_TEXT = """\
-Наступнае пераможнае паўстаньне адбудзецца ў {region} а {time}\
+Наступнае пераможнае паўстаньне можна падтрымаць у {region} (Беларусь) \
+{time} (±3 хвіліны). Для гэтага вам трэба знаходзіцца ў пазначаным \
+рэгіёне і націснуць кнопку падтрымкі на галоўнай старонцы гульні.
+
+http://prntscr.com/bsot4o\
 """
 RETRIES = 5
+
+
+def convert_erepublik_time_to_belarus_time(time):
+    return time + datetime.timedelta(hours=10)
 
 
 class BadResponseError(Exception):
@@ -223,7 +238,33 @@ class Bot:
             parse_mode='Markdown', disable_web_page_preview=True)
 
     async def send_rw_data(self, chat_id, msg_id):
+        self.logger.info(
+            'Request last battle info from erepublik-deutchland.de')
+        last_battle = await get_last_battle(loop=self.loop)
+        self.logger.debug('Info about last battle fetched %s', last_battle)
+
+        region = last_battle['region_name']
+        finished_at = last_battle['finished_at']
+        finished_at = datetime.datetime.strptime(
+            finished_at, '%Y-%m-%d %H:%M:%S')
+        next_battle_at = finished_at + datetime.timedelta(days=1)
+        next_battle_at_belarus = convert_erepublik_time_to_belarus_time(
+            next_battle_at)
+        now = datetime.datetime.utcnow()
+        now = now.replace(tzinfo=pytz.UTC)
+        now = now.astimezone(MINSK_ZONE)
+        day = None
+        if now.day == next_battle_at_belarus.day:
+            day = 'сёньня'
+        elif next_battle_at_belarus.day - now.day == 1:
+            day = 'заўтра'
+        if day is None:
+            raise Exception('Not today and not tommorow. %s' % last_battle)
+        next_battle_time_str = next_battle_at_belarus.strftime('%H:%M')
+        time = '{} пасьля {}'.format(day, next_battle_time_str)
+
         await self.post(
             'sendMessage', chat_id=chat_id,
-            text=RW_TEXT, reply_to_message_id=msg_id,
-            parse_mode='Markdown', disable_web_page_preview=True)
+            text=RW_TEXT.format(region=region, time=time),
+            reply_to_message_id=msg_id,
+            parse_mode='Markdown', disable_web_page_preview=False)
